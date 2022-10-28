@@ -1,0 +1,158 @@
+def skipRemainingStages = false
+pipeline {
+    agent any
+    tools {
+        terraform 'terraform'
+    }
+
+
+    stages {
+
+      stage("Display"){
+
+            steps{
+                // script {
+                //     skipRemainingStages = true
+
+                // }
+                script{
+                    env.IMAGE_NAME="aryaan"
+                    env.IMAGE_TAG="latest100"
+
+                }
+                script{
+                    sh "echo IMAGE_NAME ${env.IMAGE_NAME}"
+                    sh "echo IMAGE_TAG ${env.IMAGE_TAG}"
+                    a = "hello a"//IMAGE_TAG()
+                    b = "hello b"//IMAGE_NAME()
+                    sh "echo a ${a}"
+                    sh "echo b ${b}"
+                    sh "echo id ${env.CHANGE_ID}"
+                    sh "echo branch name ${env.GIT_BRANCH}"
+                    sh "echo project name ${SOURCE_PROJECT_NAME}"
+                    sh "echo full project name ${SOURCE_PROJECT_FULL_NAME}"
+                    sh "echo source branch name ${SOURCE_BRANCH_NAME}"
+                    sh "echo target branch name ${TARGET_BRANCH_NAME}"
+                }
+
+
+            }
+
+        }
+
+
+      stage('TF Init&Plan') {
+        environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                TFSTATE_KEY = "global/s3/terraform.tfstate"
+                ENCRPYT = true
+                MINUS = "PR-"
+                CLOUDFLARE_TOKEN = credentials('cloudflare-api-token')
+
+            }
+        when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+        steps {
+          script{
+                    sh "echo ${env.GIT_BRANCH} "
+            }
+          script{
+                if (SOURCE_PROJECT_NAME == "main")
+                {
+                sh """terraform -chdir="terraform" init -force-copy -reconfigure\
+                    -backend-config=\"bucket=\"terraform-infinox-state-${SOURCE_PROJECT_NAME}\"\"\
+                    -backend-config=\"key=${TFSTATE_KEY}\"\
+                    -backend-config=\"region=${AWS_REGION}\"\
+                    -backend-config=\"dynamodb_table=\"terraform-infinox-up-and-running-locks-${SOURCE_PROJECT_NAME}\"\"\
+                    -backend-config=\"encrypt=${ENCRPYT}\"  """
+                }
+                else if ((SOURCE_PROJECT_NAME).startsWith('PR'))
+                {
+                  sh """terraform -chdir="terraform" init -force-copy -reconfigure\
+                      -backend-config=\"bucket=\"terraform-infinox-state-${SOURCE_PROJECT_NAME-env.MINUS}\"\"\
+                      -backend-config=\"key=${TFSTATE_KEY}\"\
+                      -backend-config=\"region=${AWS_REGION}\"\
+                      -backend-config=\"dynamodb_table=\"terraform-infinox-up-and-running-locks-${SOURCE_PROJECT_NAME-env.MINUS}\"\"\
+                      -backend-config=\"encrypt=${ENCRPYT}\"  """
+                }
+
+          }
+          script{
+                if ((SOURCE_PROJECT_NAME== "main") || (SOURCE_PROJECT_NAME).startsWith("PR"))
+                {
+                  sh "terraform -chdir=\"terraform\" plan -var branch_name=\"${SOURCE_PROJECT_NAME}\" -var cloudflare_token=\"${env.CLOUDFLARE_TOKEN}\""
+                }
+          }
+        }
+      }
+
+      stage('TF Destroy') {
+        when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+        environment{
+            AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+            AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+            AWS_REGION = "eu-west-2"
+            CLOUDFLARE_TOKEN = credentials('cloudflare-api-token')
+        }
+        steps {
+          script{
+                sh "echo ${SOURCE_PROJECT_NAME} "
+          }
+          script{
+                if ((SOURCE_PROJECT_NAME== "main") || (SOURCE_PROJECT_NAME).startsWith("PR"))
+                {
+                  sh "terraform -chdir=\"terraform\" destroy -auto-approve -var branch_name=\"${SOURCE_PROJECT_NAME}\" -var cloudflare_token=\"${env.CLOUDFLARE_TOKEN}\""
+                }
+          }
+        }
+      }
+
+      stage('TF Destroy Backend') {
+        when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+        environment{
+            AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+            AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+            AWS_REGION = "eu-west-2"
+            MINUS = "PR-"
+
+        }
+        steps {
+          script{
+                sh "echo ${env.GIT_BRANCH} "
+          }
+          script{
+                if (SOURCE_PROJECT_NAME == "main")
+                {
+
+                  sh "aws s3api delete-object --bucket \"terraform-infinox-state-${SOURCE_PROJECT_NAME}\" --key global/s3/terraform.tfstate"
+                  sh "aws s3api delete-object --bucket \"terraform-infinox-state-${SOURCE_PROJECT_NAME}\" --key \"global/s3\""
+                  sh "aws s3api delete-object --bucket \"terraform-infinox-state-${SOURCE_PROJECT_NAME}\" --key \"global\""
+                  sh "aws s3api delete-bucket --bucket \"terraform-infinox-state-${SOURCE_PROJECT_NAME}\" --region eu-west-2"
+                  sh "aws dynamodb delete-table --table-name \"terraform-infinox-up-and-running-locks-${SOURCE_PROJECT_NAME}\" --region eu-west-2"
+                }
+                else if ((SOURCE_PROJECT_NAME).startsWith("PR"))
+                {
+                  sh "aws s3api delete-object --bucket terraform-infinox-state-${SOURCE_PROJECT_NAME-env.MINUS} --key \"global/s3/terraform.tfstate\""
+                  sh "aws s3api delete-object --bucket terraform-infinox-state-${SOURCE_PROJECT_NAME-env.MINUS} --key \"global/s3\""
+                  sh "aws s3api delete-object --bucket terraform-infinox-state-${SOURCE_PROJECT_NAME-env.MINUS} --key \"global\""
+                  sh "aws s3api delete-bucket --bucket \"terraform-infinox-state-${SOURCE_PROJECT_NAME-env.MINUS}\" --region \"eu-west-2\""
+                  sh "aws dynamodb delete-table --table-name \"terraform-infinox-up-and-running-locks-${SOURCE_PROJECT_NAME-env.MINUS}\" --region eu-west-2"
+                }
+          }
+        }
+      }
+    }
+  }

@@ -1,0 +1,150 @@
+def skipRemainingStages = false
+pipeline {
+    agent any
+    // triggers {
+    //     pollSCM('') // Enabling being build on Push
+    // }
+    stages {
+
+        stage("Display"){
+            steps{
+                // script {
+                //     skipRemainingStages = true
+
+                // }
+                script{
+                    env.IMAGE_NAME="ix-marvel"
+                    env.IMAGE_TAG="latest100"
+                    
+                }
+                script{
+                    sh "echo WORKDIR ${env.WORKDIR}"
+                    sh "echo ECR_REPO ${env.ECR_REPO}"
+                    sh "echo SERVICE_NAME ${env.SERVICE_NAME}"
+                    sh "echo IMAGE_NAME ${env.IMAGE_NAME}"
+                    sh "echo IMAGE_TAG ${env.IMAGE_TAG}"
+                    a = "hello a"//IMAGE_TAG()
+                    b = "hello b"//IMAGE_NAME()
+                    sh "echo a ${a}"
+                    sh "echo b ${b}"
+                    sh "echo branch name ${env.GIT_BRANCH}"
+                    sh "echo branch name ${env.CHANGE_ID}"
+                    sh "echo change target ${env.CHANGE_TARGET}"
+                    // sh "echo dummy name ${env.DUMMY_NAME}"
+                    // sh "echo dummy tag ${env.DUMMY_TAG}"
+                }
+            }
+        }
+
+        stage('Cloning Git') {
+            steps {
+                script {
+                    skipRemainingStages = true
+                }
+
+                script {
+                    checkout([$class: 'GitSCM', branches: [[name: "${env.GIT_BRANCH}"]], extensions: [], userRemoteConfigs: [[credentialsId: 'git-deploy', url: 'https://github.com/CityOddsCapital/ix-marvel-back.git']]])                    
+                    env.NUGET_MAJOR_MINOR = sh(
+                    script: 'grep -i version MarvelBackend/ClientLibrary/ClientLibrary.csproj  | cut -d\\> -f2 | cut -d. -f1,2',
+                    returnStdout: true).trim()
+                }
+
+                script {
+                    if (env.GIT_BRANCH == 'main') {
+                        env.NUGET_VERSION =  "${env.NUGET_MAJOR_MINOR}.${env.BUILD_ID}"
+                    }
+                        else if (env.CHANGE_ID) {
+                        env.NUGET_VERSION =  "${env.NUGET_MAJOR_MINOR}.${env.BUILD_ID}-${env.GIT_BRANCH}"
+                        }
+                }
+                sh "echo Version ${env.NUGET_VERSION}"
+            }
+        }
+
+        stage("Dotnet add source") {
+
+            //  when {
+            //     expression {
+            //         !skipRemainingStages
+            //     }
+            // }
+
+            environment{
+                GITHUB_TOKEN = credentials('github-write')
+                NUGET_URL = "https://nuget.pkg.github.com/cityoddsbot/index.json"
+                USERNAME = "cityoddsbot"
+            }
+            steps {
+
+
+
+                script
+                    {
+                        
+                        if ((env.GIT_BRANCH == 'main') || (env.CHANGE_ID)) {
+                            try{
+                                sh """cd MarvelBackend/ClientLibrary
+                                    dotnet nuget remove source github2
+                                    """
+                            }
+                            catch (Exception e){
+                                sh "echo Exception occurred: ${e.toString()}"
+                            }
+
+                            sh """cd MarvelBackend/ClientLibrary
+                                    dotnet nuget add source --username ${env.USERNAME} --password ${env.GITHUB_TOKEN} --store-password-in-clear-text --name github2 ${env.NUGET_URL}
+                                    """
+                        }
+                    }
+            }
+        }
+
+        stage("Dotnet pack") {
+            //  when {
+            //     expression {
+            //         !skipRemainingStages
+            //     }
+            // }
+            steps {
+
+                script
+                    {
+                        if ((env.GIT_BRANCH == 'main') || (env.CHANGE_ID)) {
+                        sh """cd MarvelBackend/ClientLibrary
+                        cat ClientLibrary.csproj | sed 's/<Version>\\(.*\\)<\\/Version>/<Version>${env.NUGET_VERSION}<\\/Version>/g' > ClientLibrary.csproj.tmp
+                        mv  ClientLibrary.csproj.tmp ClientLibrary.csproj
+                         dotnet pack --configuration Release 
+                         cat ClientLibrary.csproj
+                            """
+                        }
+                        //   /p:Version="ClientLibrary.${env.NUGET_VERSION}.nupkg"
+                    }
+
+            }
+        }
+
+        stage("Dotnet push") {
+            //  when {
+            //     expression {
+            //         !skipRemainingStages
+            //     }
+            // }
+            environment{
+                GITHUB_TOKEN = credentials('github-write')
+                WORK_LOC = "ClientLibrary.${env.NUGET_VERSION}.nupkg"
+            }
+            steps {
+                sh "echo WORK_LOC ${WORK_LOC} "
+                script
+                    {
+                        if ((env.GIT_BRANCH == 'main') || (env.CHANGE_ID)) {
+                        sh """cd MarvelBackend/ClientLibrary/bin/Release
+                            dotnet nuget push ${WORK_LOC} --api-key ${env.GITHUB_TOKEN} --source github2
+                            """
+                        }
+                    }
+                    
+            }
+        }
+    }
+}

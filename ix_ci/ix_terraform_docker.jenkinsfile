@@ -1,0 +1,422 @@
+def IMAGE_TAG() { return new Date().format('yyyyMMdd') + "-" + "${env.GIT_COMMIT[0..7]}" }
+def IMAGE_NAME() { return "580990347077.dkr.ecr.eu-west-2.amazonaws.com/" + "${env.SERVICE_NAME}"}
+def skipRemainingStages = false
+pipeline {
+    agent any
+    // triggers {
+    //     pollSCM('') // Enabling being build on Push changes
+    // }
+    tools {
+        terraform 'terraform'
+    }
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+    }
+    environment {
+        WORKDIR = "marvel-api-v1"
+        ECR_REPO = "580990347077.dkr.ecr.eu-west-2.amazonaws.com"
+        SERVICE_NAME = "marvel-api-v1"
+    }
+    stages {
+        stage("Display"){
+            steps{
+                // script {
+                //     skipRemainingStages = true
+
+                // }
+                script{
+                    env.IMAGE_NAME="ix-marvel"
+                    env.IMAGE_TAG="latest100"
+                    env.DUMMY_NAME = IMAGE_NAME()
+                    env.DUMMY_TAG = IMAGE_TAG()
+                }
+                script{
+                    sh "echo WORKDIR ${env.WORKDIR}"
+                    sh "echo ECR_REPO ${env.ECR_REPO}"
+                    sh "echo SERVICE_NAME ${env.SERVICE_NAME}"
+                    sh "echo IMAGE_NAME ${env.IMAGE_NAME}"
+                    sh "echo IMAGE_TAG ${env.IMAGE_TAG}"
+                    a = "hello a"//IMAGE_TAG()
+                    b = "hello b"//IMAGE_NAME()
+                    sh "echo a ${a}"
+                    sh "echo b ${b}"
+                    sh "echo branch name ${env.GIT_BRANCH}"
+                    sh "echo branch name ${env.CHANGE_ID}"
+                    sh "echo change target ${env.CHANGE_TARGET}"
+                    // sh "echo dummy name ${env.DUMMY_NAME}"
+                    // sh "echo dummy tag ${env.DUMMY_TAG}"
+                }
+            }
+        }
+
+         // A separate init, plan and apply for aws pinpoint as John wants it to be created only once for every pull request.
+
+        stage('TF Setting up backend for pinpoint') {
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                MINUS = "PR-"
+            }
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            steps {
+                script{
+                        if (env.GIT_BRANCH == "main")
+                        {
+                            def status_bucket = sh(script: "aws s3api head-bucket --bucket \"terraform-infinox-pinpoint-state-${env.GIT_BRANCH}\" ", returnStatus: true)
+                            def status_dynamo_db = sh(script: "aws dynamodb wait table-exists --table-name \"terraform-infinox-pinpoint-up-and-running-locks-${env.GIT_BRANCH}\" ", returnStatus: true)
+                            if (status_bucket != 0 && status_dynamo_db != 0) {
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" init"
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" plan -var branch_name=\"${env.GIT_BRANCH}\" "
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\" "
+                            }
+                        }
+                        else if (env.CHANGE_ID)
+                        {
+                            def status_bucket = sh(script: "aws s3api head-bucket --bucket \"terraform-infinox-pinpoint-state-pr\" ", returnStatus: true)
+                            def status_dynamo_db = sh(script: "aws dynamodb wait table-exists --table-name \"terraform-infinox-pinpoint-up-and-running-locks-pr\" ", returnStatus: true)
+                            sh "echo status_dynamo_db ${status_dynamo_db}"
+                            if (status_bucket != 0 && status_dynamo_db != 0) {
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" init"
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" plan -var branch_name=\"${env.GIT_BRANCH}\" "
+                                sh "terraform -chdir=\"terraform_setup_pinpoint_once\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\" "
+                            }
+
+                        }
+
+                    }
+                }
+        }
+
+        stage('TF Pinpoint Init&Plan') {
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                TFSTATE_KEY = "global/s3/terraform.tfstate"
+                ENCRPYT = true
+            }
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            steps {
+                    script{
+                                sh "echo ${env.GIT_BRANCH} "
+                        }
+                    script{
+
+                        if (env.GIT_BRANCH == "main")
+                            {
+                                sh """terraform -chdir="terraform_pinpoint" init -force-copy -reconfigure\
+                                    -backend-config=\"bucket=\"terraform-infinox-pinpoint-state-${env.GIT_BRANCH}\"\"\
+                                    -backend-config=\"key=${TFSTATE_KEY}\"\
+                                    -backend-config=\"region=${AWS_REGION}\"\
+                                    -backend-config=\"dynamodb_table=\"terraform-infinox-pinpoint-up-and-running-locks-${env.GIT_BRANCH}\"\"\
+                                    -backend-config=\"encrypt=${ENCRPYT}\"  """
+                            }
+                        else if (env.CHANGE_ID)
+                            {
+                                sh """terraform -chdir="terraform_pinpoint" init -force-copy -reconfigure\
+                                    -backend-config=\"bucket=\"terraform-infinox-pinpoint-state-pr\"\"\
+                                    -backend-config=\"key=${TFSTATE_KEY}\"\
+                                    -backend-config=\"region=${AWS_REGION}\"\
+                                    -backend-config=\"dynamodb_table=\"terraform-infinox-pinpoint-up-and-running-locks-pr\"\"\
+                                    -backend-config=\"encrypt=${ENCRPYT}\"  """
+                            }
+
+                    }
+                    script{
+                            if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                            {
+                                sh "echo ${env.GIT_BRANCH} "
+                                sh "terraform -chdir=\"terraform_pinpoint\" plan -var branch_name=\"${env.GIT_BRANCH}\""
+                            }
+                    }
+                }
+        }
+
+        stage('TF Pinpoint Apply') {
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+            }
+            steps {
+                script{
+                        sh "echo ${env.GIT_BRANCH} "
+                }
+                script{
+                        if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                        {
+                            sh "echo ${env.GIT_BRANCH} "
+                            sh "terraform -chdir=\"terraform_pinpoint\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\""
+                        }
+                }
+            }
+        }
+
+        stage('TF Setting up backend') {
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                MINUS = "PR-"
+            }
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            steps {
+                script{
+                        if (env.GIT_BRANCH == "main")
+                        {
+                            def status_bucket = sh(script: "aws s3api head-bucket --bucket \"terraform-infinox-state-${env.GIT_BRANCH}\" ", returnStatus: true)
+                            def status_dynamo_db = sh(script: "aws dynamodb wait table-exists --table-name \"terraform-infinox-up-and-running-locks-${env.GIT_BRANCH}\" ", returnStatus: true)
+                            if (status_bucket != 0 && status_dynamo_db != 0) {
+                                sh "terraform -chdir=\"terraform_setup_once\" init"
+                                sh "terraform -chdir=\"terraform_setup_once\" plan -var branch_name=\"${env.GIT_BRANCH}\" "
+                                sh "terraform -chdir=\"terraform_setup_once\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\" "
+                            }
+                        }
+                        else if (env.CHANGE_ID)
+                        {
+                            def status_bucket = sh(script: "aws s3api head-bucket --bucket \"terraform-infinox-state-${env.GIT_BRANCH-env.MINUS}\" ", returnStatus: true)
+                            def status_dynamo_db = sh(script: "aws dynamodb wait table-exists --table-name \"terraform-infinox-up-and-running-locks-${env.GIT_BRANCH-env.MINUS}\" ", returnStatus: true)
+                            if (status_bucket != 0 && status_dynamo_db != 0) {
+                                sh "terraform -chdir=\"terraform_setup_once\" init"
+                                sh "terraform -chdir=\"terraform_setup_once\" plan -var branch_name=\"${env.GIT_BRANCH}\" "
+                                sh "terraform -chdir=\"terraform_setup_once\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\" "
+                            }
+
+                        }
+
+                    }
+                }
+        }
+
+
+        // A separate init, plan and apply for other aws resources that John wants to be created everytime there is a new pull request
+
+        stage('TF Init&Plan') {
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                TFSTATE_KEY = "global/s3/terraform.tfstate"
+                ENCRPYT = true
+                MINUS = "PR-"
+                CLOUDFLARE_TOKEN = credentials('cloudflare-api-token')
+            }
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            steps {
+                    script{
+                                sh "echo ${env.GIT_BRANCH} "
+                        }
+                    script{
+                        if (env.GIT_BRANCH == "main")
+                            {
+                                sh """terraform -chdir="terraform" init -force-copy -reconfigure\
+                                    -backend-config=\"bucket=\"terraform-infinox-state-${env.GIT_BRANCH}\"\"\
+                                    -backend-config=\"key=${TFSTATE_KEY}\"\
+                                    -backend-config=\"region=${AWS_REGION}\"\
+                                    -backend-config=\"dynamodb_table=\"terraform-infinox-up-and-running-locks-${env.GIT_BRANCH}\"\"\
+                                    -backend-config=\"encrypt=${ENCRPYT}\"  """
+                            }
+                        else if (env.CHANGE_ID)
+                            {
+                                sh """terraform -chdir="terraform" init -force-copy -reconfigure\
+                                    -backend-config=\"bucket=\"terraform-infinox-state-${env.GIT_BRANCH-env.MINUS}\"\"\
+                                    -backend-config=\"key=${TFSTATE_KEY}\"\
+                                    -backend-config=\"region=${AWS_REGION}\"\
+                                    -backend-config=\"dynamodb_table=\"terraform-infinox-up-and-running-locks-${env.GIT_BRANCH-env.MINUS}\"\"\
+                                    -backend-config=\"encrypt=${ENCRPYT}\"  """
+                            }
+                        }
+                    script{
+                        if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                        {
+                            sh "terraform -chdir=\"terraform\" plan -var branch_name=\"${env.GIT_BRANCH}\" -var cloudflare_token=\"${env.CLOUDFLARE_TOKEN}\""
+                        }
+                    }
+                }
+        }
+
+        stage('TF Apply') {
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+                }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                CLOUDFLARE_TOKEN = credentials('cloudflare-api-token')
+            }
+            steps {
+                script{
+                        sh "echo ${env.GIT_BRANCH} "
+                }
+                script{
+                        if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                        {
+                            sh "terraform -chdir=\"terraform\" apply -auto-approve -var branch_name=\"${env.GIT_BRANCH}\" -var cloudflare_token=\"${env.CLOUDFLARE_TOKEN}\""
+                        }
+                }
+            }
+        }
+
+        stage('Logging into AWS ECR') {
+            when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+            }
+            steps {
+                script {
+                
+                    if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                    {
+                        sh "aws ecr get-login-password --region eu-west-2 | docker login --username AWS --password-stdin ${ECR_REPO}"
+                    }
+                }
+
+            }
+        }
+
+        stage("Build docker image") {
+            when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+            }
+            steps {
+
+                script
+                    {
+                        if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                        {
+                            sh """cd MarvelBackend
+                            docker build --build-arg aws_access_key=${AWS_ACCESS_KEY_ID} --build-arg aws_secret_access_key=${AWS_SECRET_ACCESS_KEY} --build-arg number=3 -t ${env.IMAGE_NAME}:${env.IMAGE_TAG} -f MarvelAPI/Dockerfile .
+                            """
+                        }
+                    }
+
+            }
+
+        }
+        stage('Pushing to ECR') {
+            when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+            environment{
+                MINUS = "PR-"
+            }
+            steps{
+                    script {
+                            if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                            {
+                                sh """cd MarvelBackend
+                                docker tag ${env.IMAGE_NAME}:${env.IMAGE_TAG} ${ECR_REPO}/marvel-api-${env.GIT_BRANCH-env.MINUS}:${env.IMAGE_TAG}
+                                docker push ${ECR_REPO}/marvel-api-${env.GIT_BRANCH-env.MINUS}:${env.IMAGE_TAG}
+                                """
+                            }
+                    }
+                }
+        }
+        stage("Deploy to cluster") {
+            when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                MINUS = "PR-"
+            }
+            steps{
+                    script{
+                            if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                            {
+                                sh" echo fabfuel/ecs-deploy:1.10.2 ecs deploy \"marvel-cluster-${env.GIT_BRANCH-env.MINUS}\" \"ix-marvel-api-${env.GIT_BRANCH-env.MINUS}\" --tag ${env.IMAGE_TAG} --no-deregister --timeout 800 --region ${env.AWS_REGION} --access-key-id ${env.AWS_ACCESS_KEY_ID} --secret-access-key ${env.AWS_SECRET_ACCESS_KEY}"
+                            }
+                    }
+            }
+        }
+        stage("Updating ecs service") {
+            when {
+                expression {
+                    !skipRemainingStages
+                }
+            }
+            environment{
+                AWS_ACCESS_KEY_ID     = credentials('aws_access_key')
+                AWS_SECRET_ACCESS_KEY = credentials('aws_secret_access_key')
+                AWS_REGION = "eu-west-2"
+                MINUS = "PR-"
+            }
+            steps{
+                script{
+                        if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                        {
+                            sh" aws ecs update-service --region eu-west-2 --force-new-deployment --service \"ix-marvel-api-${env.GIT_BRANCH-env.MINUS}\" --cluster \"marvel-cluster-${env.GIT_BRANCH-env.MINUS}\""
+                        }
+                }
+            }
+        }
+    
+    
+        stage("Removing docker image after pushed")
+        {
+
+            when {
+                    expression {
+                        !skipRemainingStages
+                    }
+            }
+            
+            steps{
+                script{
+                    if ((env.GIT_BRANCH == "main") || (env.CHANGE_ID))
+                    {
+                        sh "docker rmi  ${env.IMAGE_NAME}:${env.IMAGE_TAG} || true"
+                        // sh "docker rmi  ${env.IMAGE_NAME}:latest || true"
+                        cleanWs()
+                    }
+                }
+            }
+        }
+    }
+}
